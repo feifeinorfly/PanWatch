@@ -272,6 +272,21 @@ def _patched_route_to_vendor(method_name: str, *args, **kwargs):
         )
         return upstream_result
 
+    # 行业/主题新闻:get_news 的 query 不是 ticker(中文行业词等) → 实时搜中文新闻(东方财富),
+    # 替代拉不到中文数据的上游 vendor。
+    if symbol and "news" in method_name.lower() and not is_panwatch_routable(symbol):
+        try:
+            result = _serve_keyword_news(symbol)
+            _emit_toolkit_log(
+                "info", "HIT", method_name, symbol,
+                chars=len(result), snippet=result[:4000],
+                source="panwatch keyword news", extra_args=_args_summary(args),
+            )
+            return result
+        except Exception as e:
+            _emit_toolkit_log("warning", "ERROR", method_name, symbol, error=str(e)[:200])
+            return f"[关键词新闻搜索失败「{symbol}」: {e}]"
+
     # 美股 / 其他:直接走上游 vendor
     upstream_result = _real_route_to_vendor(method_name, *args, **kwargs)
     upstream_str = str(upstream_result) if upstream_result is not None else ""
@@ -496,6 +511,30 @@ def _serve_from_panwatch(method_name: str, symbol: str, kwargs: dict, args: tupl
 
     # 未识别:让上游走默认 vendor
     raise NotImplementedError(f"no panwatch backing for {method_name}")
+
+
+def _serve_keyword_news(keyword: str) -> str:
+    """实时按行业/主题关键词搜中文新闻(东方财富搜索),格式化返回。
+
+    用于 get_news 的 query 是行业/主题词(非 ticker,如"汽车行业""新能源汽车")时,
+    替代拉不到中文数据的上游 vendor。在 worker 线程内同步执行(asyncio.run)。
+    """
+    import asyncio
+
+    from src.collectors.news_collector import EastMoneyStockNewsCollector
+
+    items = asyncio.run(EastMoneyStockNewsCollector().fetch_by_keyword(keyword))
+    if not items:
+        return (
+            f"[未搜到「{keyword}」相关行业/主题新闻。请基于个股新闻 + 元信息分析,"
+            "不要编造行业新闻。]"
+        )
+    lines = [f"[行业/主题新闻「{keyword}」(来自东方财富,共 {len(items)} 条)]"]
+    for it in items[:15]:
+        ts = getattr(it, "publish_time", "")
+        title = getattr(it, "title", "") or ""
+        lines.append(f"- [{ts}] {title}")
+    return "\n".join(lines)
 
 
 def _render_single_indicator(indicator: str, symbol: str) -> str:

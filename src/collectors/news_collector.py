@@ -312,6 +312,20 @@ class EastMoneyStockNewsCollector(BaseNewsCollector):
             return [n for n in unique_news if n.publish_time >= since]
         return unique_news
 
+    async def fetch_by_keyword(self, keyword: str) -> list[NewsItem]:
+        """按任意关键词(行业/主题词,如"汽车行业""新能源汽车")搜中文新闻。
+
+        复用东方财富搜索 API —— keyword 不限股票名,无需 cookie。
+        给 TradingAgents 新闻分析师的行业/主题新闻查询用(个股查询走 fetch_news)。
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://so.eastmoney.com/",
+            "Accept": "*/*",
+        }
+        async with httpx.AsyncClient(timeout=8, verify=False, headers=headers) as client:
+            return await self._fetch_for_symbol(client, keyword, keyword, None)
+
     async def _fetch_for_symbol(self, client: httpx.AsyncClient, symbol: str, stock_name: str, since: datetime | None) -> list[NewsItem]:
         """获取单只股票的新闻（使用搜索 API，用股票名称搜索）"""
         import json as json_module

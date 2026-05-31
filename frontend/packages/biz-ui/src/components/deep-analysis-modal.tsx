@@ -305,7 +305,7 @@ export function DeepAnalysisModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl w-[92vw] max-h-[85vh] overflow-y-auto scrollbar">
+      <DialogContent className="max-w-none w-[96vw] h-[94vh] max-h-[94vh] overflow-y-auto scrollbar">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             🧠 深度分析 · {stockName} ({stockSymbol})
@@ -733,7 +733,7 @@ function AnalysisTabs({
         </TabsList>
         {items.map((it) => (
           <TabsContent key={it.key} value={it.key}>
-            <div className="prose prose-sm dark:prose-invert max-w-none max-h-[32rem] overflow-y-auto prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:text-[12px]">
+            <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-table:text-[12px] prose-strong:text-foreground">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.content}</ReactMarkdown>
             </div>
           </TabsContent>
