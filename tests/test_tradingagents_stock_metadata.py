@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.agents.tradingagents.portfolio_context import build_stock_metadata_context
 from src.agents.tradingagents.toolkit_adapter import (
-    _PANWATCH_DATA_CACHE,
     _stock_meta_header,
     _serve_from_panwatch,
     panwatch_data_context,
@@ -56,7 +55,7 @@ def test_metadata_context_us_market_label():
 
 
 def test_stock_meta_header_from_cache():
-    """工具返回前缀包含公司名(来自 _PANWATCH_DATA_CACHE)"""
+    """工具返回前缀包含公司名(来自 panwatch_data_context 注入的数据)"""
     stock = _FakeStock("赛力斯", "601127", "CN")
     quote = {"current_price": 83.26, "change_pct": -2.5, "industry": "汽车"}
     with panwatch_data_context({"stock": stock, "quote": quote}):

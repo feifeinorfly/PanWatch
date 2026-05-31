@@ -216,12 +216,12 @@ class TestToolkitAdapter(unittest.TestCase):
         self.assertFalse(is_a_share(""))
 
     def test_panwatch_data_context_isolation(self):
-        """数据上下文 — 进入/退出时不污染外部"""
+        """数据上下文 — 进入/退出时不污染外部(基于 ContextVar)"""
         from src.agents.tradingagents import toolkit_adapter
-        self.assertEqual(toolkit_adapter._PANWATCH_DATA_CACHE, {})
+        self.assertEqual(toolkit_adapter._cache(), {})
         with panwatch_data_context({"klines": [1, 2, 3]}):
-            self.assertEqual(toolkit_adapter._PANWATCH_DATA_CACHE.get("klines"), [1, 2, 3])
-        self.assertEqual(toolkit_adapter._PANWATCH_DATA_CACHE, {})
+            self.assertEqual(toolkit_adapter._cache().get("klines"), [1, 2, 3])
+        self.assertEqual(toolkit_adapter._cache(), {})
 
     def test_patch_route_to_vendor_noop_when_lib_absent(self):
         """tradingagents 未安装 — patch 上下文 no-op,不抛异常"""
