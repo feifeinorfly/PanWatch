@@ -212,7 +212,7 @@ class EastMoneyDiscoveryCollector:
                     timeout=timeout,
                     verify=self.verify_ssl,
                     follow_redirects=True,
-                    trust_env=True,
+                    trust_env=False,  # 不吃 env 代理(Telegram/AI 用),仅用显式配置的 self.proxy
                     headers=headers,
                     proxy=self.proxy,
                 ) as client:

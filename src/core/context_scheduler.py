@@ -8,6 +8,7 @@ import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from src.collectors.kline_collector import kline_source
 from src.core.context_store import cleanup_context_data
 from src.core.entry_candidates import evaluate_entry_candidate_outcomes
 from src.core.prediction_outcome import evaluate_pending_prediction_outcomes
@@ -53,12 +54,13 @@ class ContextMaintenanceScheduler:
                 stats.get("skipped_not_due", 0),
                 stats.get("skipped_no_price", 0),
             )
-            cand_stats = await asyncio.to_thread(
-                evaluate_entry_candidate_outcomes,
-                horizons=(1, 3, 5, 10),
-                snapshot_days=45,
-                limit=500,
-            )
+            with kline_source("outcome_eval"):
+                cand_stats = await asyncio.to_thread(
+                    evaluate_entry_candidate_outcomes,
+                    horizons=(1, 3, 5, 10),
+                    snapshot_days=45,
+                    limit=500,
+                )
             level = logging.INFO if cand_stats.get("evaluated", 0) else logging.DEBUG
             logger.log(
                 level,
@@ -69,12 +71,13 @@ class ContextMaintenanceScheduler:
                 cand_stats.get("skipped_not_due", 0),
                 cand_stats.get("skipped_no_price", 0),
             )
-            strategy_stats = await asyncio.to_thread(
-                evaluate_strategy_outcomes,
-                horizons=(1, 3, 5, 10),
-                snapshot_days=60,
-                limit=1200,
-            )
+            with kline_source("outcome_eval"):
+                strategy_stats = await asyncio.to_thread(
+                    evaluate_strategy_outcomes,
+                    horizons=(1, 3, 5, 10),
+                    snapshot_days=60,
+                    limit=1200,
+                )
             level = logging.INFO if strategy_stats.get("evaluated", 0) else logging.DEBUG
             logger.log(
                 level,
@@ -168,14 +171,15 @@ class ContextMaintenanceScheduler:
             return
         self._refreshing = True
         try:
-            result = await asyncio.to_thread(
-                refresh_strategy_signals,
-                rebuild_candidates=True,
-                max_inputs=500,
-                market_scan_limit=80,
-                max_kline_symbols=60,
-                limit_candidates=2000,
-            )
+            with kline_source("refresh_opportunities"):
+                result = await asyncio.to_thread(
+                    refresh_strategy_signals,
+                    rebuild_candidates=True,
+                    max_inputs=500,
+                    market_scan_limit=80,
+                    max_kline_symbols=60,
+                    limit_candidates=2000,
+                )
             level = logging.INFO if result.get("count", 0) else logging.DEBUG
             logger.log(
                 level,
@@ -190,14 +194,15 @@ class ContextMaintenanceScheduler:
 
     async def refresh_opportunities_once(self) -> dict:
         """手动触发一次机会刷新。"""
-        return await asyncio.to_thread(
-            refresh_strategy_signals,
-            rebuild_candidates=True,
-            max_inputs=500,
-            market_scan_limit=80,
-            max_kline_symbols=60,
-            limit_candidates=2000,
-        )
+        with kline_source("refresh_opportunities"):
+            return await asyncio.to_thread(
+                refresh_strategy_signals,
+                rebuild_candidates=True,
+                max_inputs=500,
+                market_scan_limit=80,
+                max_kline_symbols=60,
+                limit_candidates=2000,
+            )
 
     async def cleanup_once(self) -> dict:
         return await asyncio.to_thread(

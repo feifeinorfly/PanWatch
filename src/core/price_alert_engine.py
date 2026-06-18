@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.collectors.kline_collector import KlineCollector
+from src.collectors.kline_collector import KlineCollector, kline_source
 from src.core.notifier import NotifierManager
 from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.models.market import MarketCode, MARKETS
@@ -142,7 +142,8 @@ class PriceAlertEngine:
         if cached and now - cached[0] < self.kline_ttl_sec:
             return cached[1]
         try:
-            summary = await asyncio.to_thread(KlineCollector(market).get_kline_summary, symbol)
+            with kline_source("price_alert"):
+                summary = await asyncio.to_thread(KlineCollector(market).get_kline_summary, symbol)
         except Exception:
             summary = {}
         self._kline_cache[key] = (now, summary or {})

@@ -55,6 +55,16 @@ def _mock_stock_link_platform(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_kline_cache():
+    """清空 K线内存缓存,避免用例间互相污染(get_klines 现按市场状态缓存)。"""
+    from src.collectors import kline_collector
+
+    kline_collector.clear_kline_cache()
+    yield
+    kline_collector.clear_kline_cache()
+
+
 # ---------------------------------------------------------------------------
 # 共用工厂 fixtures
 # ---------------------------------------------------------------------------
