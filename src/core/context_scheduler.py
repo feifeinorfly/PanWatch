@@ -218,6 +218,7 @@ class ContextMaintenanceScheduler:
             self._evaluate_job,
             "interval",
             hours=self.eval_interval_hours,
+            jitter=120,  # 错峰,避免与 price_alert/paper_trading(60s)同刻写 SQLite
             id="context_maintenance_evaluate",
             replace_existing=True,
             coalesce=True,
@@ -228,6 +229,7 @@ class ContextMaintenanceScheduler:
             "cron",
             hour=4,
             minute=15,
+            jitter=120,
             id="context_maintenance_cleanup",
             replace_existing=True,
             coalesce=True,
@@ -240,6 +242,7 @@ class ContextMaintenanceScheduler:
                 "cron",
                 hour=job_hour,
                 minute=job_minute,
+                jitter=120,  # 错峰,避免与其它调度同刻写 SQLite
                 id=f"context_maintenance_refresh_opportunities_{job_hour:02d}{job_minute:02d}",
                 replace_existing=True,
                 coalesce=True,
