@@ -341,17 +341,6 @@ export default function SettingsPage() {
     }
   }
 
-  const onRemoveAvatar = async () => {
-    setAvatarSaving(true)
-    try {
-      await saveAvatar('')
-      toast('头像已移除', 'success')
-    } catch {
-      toast('操作失败', 'error')
-    } finally {
-      setAvatarSaving(false)
-    }
-  }
 
   const handleSave = async (key: string) => {
     setSaving(key)
@@ -611,16 +600,6 @@ export default function SettingsPage() {
                   <Upload className="w-3.5 h-3.5 text-white" />
                 </span>
               </button>
-              {avatar ? (
-                <button
-                  type="button"
-                  onClick={onRemoveAvatar}
-                  disabled={avatarSaving}
-                  className="opacity-60 hover:text-destructive hover:opacity-100 transition-colors"
-                >
-                  移除头像
-                </button>
-              ) : null}
               <span className="mx-1 hidden h-4 w-px bg-border/50 sm:block" />
               <div className="px-2.5 py-1 rounded-full bg-background/70 border border-border/50 text-[11px] text-muted-foreground">
                 <span className="font-mono text-foreground/90">{services.length}</span> 服务商
