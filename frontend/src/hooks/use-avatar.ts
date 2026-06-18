@@ -2,44 +2,66 @@ import { useState, useEffect } from 'react'
 import { fetchAPI } from '@panwatch/api'
 
 const EVENT = 'panwatch:avatar-changed'
-let cache: string | null = null
-let inflight: Promise<string> | null = null
+const LS_KEY = 'panwatch-avatar'
 
-function load(): Promise<string> {
-  if (cache !== null) return Promise.resolve(cache)
-  if (!inflight) {
-    inflight = fetchAPI<{ value: string }>('/settings/avatar')
-      .then(r => {
-        cache = r?.value || ''
-        return cache
-      })
-      .catch(() => {
-        cache = ''
-        return ''
-      })
+function readLocal(): string {
+  try {
+    return localStorage.getItem(LS_KEY) || ''
+  } catch {
+    return ''
   }
-  return inflight
 }
 
 /**
- * 保存头像(传空字符串清空)并广播,使所有头像处即时更新。
- * 走通用 PUT /settings/{key}(catch-all)写入 ui_avatar:不依赖新路由注册顺序,
- * 读取则用 GET /settings/avatar(单独读 ui_avatar)。
+ * 保存头像(传空字符串=清空):
+ * 1) 先写 localStorage 并广播 —— 立即生效,刷新不丢,不依赖后端新路由是否已部署;
+ * 2) 后台同步到后端(多设备/换浏览器),失败不影响本地显示。
  */
 export async function saveAvatar(value: string): Promise<void> {
-  await fetchAPI('/settings/ui_avatar', { method: 'PUT', body: JSON.stringify({ value }) })
-  cache = value
+  try {
+    if (value) localStorage.setItem(LS_KEY, value)
+    else localStorage.removeItem(LS_KEY)
+  } catch {
+    /* 忽略 localStorage 配额错误 */
+  }
   window.dispatchEvent(new CustomEvent<string>(EVENT, { detail: value }))
+  try {
+    await fetchAPI('/settings/ui_avatar', { method: 'PUT', body: JSON.stringify({ value }) })
+  } catch {
+    /* 后端同步失败不阻塞本地 */
+  }
 }
 
-/** 当前头像(data URL 或图片地址),未设置为空串。跨组件即时同步。 */
+let calibrated = false
+
+/**
+ * 当前头像(data URL 或图片地址)。localStorage 优先(刷新即在),
+ * 首次再用后端 GET /settings/avatar 校准(多设备同步;旧后端无该路由时忽略错误,保留本地)。
+ */
 export function useAvatar(): string {
-  const [avatar, setAvatar] = useState<string>(cache ?? '')
+  const [avatar, setAvatar] = useState<string>(readLocal)
+
   useEffect(() => {
     let alive = true
-    load().then(v => {
-      if (alive) setAvatar(v)
-    })
+    if (!calibrated) {
+      calibrated = true
+      fetchAPI<{ value: string }>('/settings/avatar')
+        .then(r => {
+          const v = r?.value || ''
+          if (!alive || v === readLocal()) return
+          // 后端可达即视为权威:有值则采用,空值则清本地;两边都写
+          try {
+            if (v) localStorage.setItem(LS_KEY, v)
+            else localStorage.removeItem(LS_KEY)
+          } catch {
+            /* ignore */
+          }
+          window.dispatchEvent(new CustomEvent<string>(EVENT, { detail: v }))
+        })
+        .catch(() => {
+          /* 后端旧版无 /settings/avatar 路由或网络错误:保留本地值 */
+        })
+    }
     const onChange = (e: Event) => setAvatar((e as CustomEvent<string>).detail ?? '')
     window.addEventListener(EVENT, onChange)
     return () => {
@@ -47,12 +69,13 @@ export function useAvatar(): string {
       window.removeEventListener(EVENT, onChange)
     }
   }, [])
+
   return avatar
 }
 
 /**
- * 把上传的图片文件压缩为 128×128 的方形 JPEG data URL(居中裁剪),
- * 控制体积(约 10-20KB),避免大 base64 撑爆设置存储。
+ * 把上传的图片文件压缩为 size×size 的方形 JPEG data URL(居中裁剪),
+ * 控制体积(约 10-20KB),避免大 base64 撑爆存储。
  */
 export function fileToAvatarDataUrl(file: File, size = 128): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -70,7 +93,6 @@ export function fileToAvatarDataUrl(file: File, size = 128): Promise<string> {
           reject(new Error('canvas 不可用'))
           return
         }
-        // 居中裁剪填满方形
         const scale = Math.max(size / img.width, size / img.height)
         const w = img.width * scale
         const h = img.height * scale

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Check, Eye, EyeOff, Plus, Pencil, Trash2, Star, Send, Cpu, Play, Download, Upload, FileJson, BarChart3, TrendingUp } from 'lucide-react'
+import { Check, Eye, EyeOff, Plus, Pencil, Trash2, Star, Send, Cpu, Play, Download, Upload, FileJson, BarChart3, User } from 'lucide-react'
 import { fetchAPI, type AIService, type AIModel, type NotifyChannel } from '@panwatch/api'
 import { useAvatar, saveAvatar, fileToAvatarDataUrl } from '@/hooks/use-avatar'
 import { Input } from '@panwatch/base-ui/components/ui/input'
@@ -605,7 +605,7 @@ export default function SettingsPage() {
                 {avatar ? (
                   <img src={avatar} alt="头像" className="w-full h-full object-cover" />
                 ) : (
-                  <TrendingUp className="w-4 h-4" />
+                  <User className="w-4 h-4" />
                 )}
                 <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
                   <Upload className="w-3.5 h-3.5 text-white" />
