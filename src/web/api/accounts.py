@@ -597,3 +597,77 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
             logger.error(f"获取 {market} 行情失败: {e}")
 
     return quotes
+
+
+def _gather_holdings(db: Session) -> list[dict]:
+    """汇总所有启用账户的真实持仓为统一列表(CNY 市值/浮盈 + fx),多账户同股合并。"""
+    accounts = db.query(Account).filter(Account.enabled == True).all()  # noqa: E712
+    stock_ids = {p.stock_id for acc in accounts for p in acc.positions}
+    stocks = db.query(Stock).filter(Stock.id.in_(stock_ids)).all() if stock_ids else []
+    stock_map = {s.id: s for s in stocks}
+    quotes = _fetch_quotes_for_stocks(stocks) if stocks else {}
+    hkd, usd = get_hkd_cny_rate(), get_usd_cny_rate()
+
+    out: list[dict] = []
+    seen: dict[tuple[str, str], dict] = {}
+    for acc in accounts:
+        for pos in acc.positions:
+            stock = stock_map.get(pos.stock_id)
+            if not stock:
+                continue
+            rate = hkd if stock.market == "HK" else usd if stock.market == "US" else 1.0
+            quote = quotes.get(stock.symbol)
+            price = quote.get("current_price") if quote else None
+            cost_cny = pos.cost_price * pos.quantity * rate
+            mv_cny = (price * pos.quantity * rate) if price else cost_cny
+            pnl_cny = (mv_cny - cost_cny) if price else 0.0
+            key = (stock.market, stock.symbol)
+            if key in seen:  # 多账户同一标的合并
+                h = seen[key]
+                h["quantity"] += pos.quantity
+                h["market_value"] += mv_cny
+                h["unrealized_pnl"] += pnl_cny
+            else:
+                h = {
+                    "symbol": stock.symbol,
+                    "market": stock.market,
+                    "name": stock.name,
+                    "quantity": pos.quantity,
+                    "fx": rate,
+                    "market_value": mv_cny,
+                    "unrealized_pnl": pnl_cny,
+                    "strategy_code": pos.trading_style or "",
+                }
+                seen[key] = h
+                out.append(h)
+    return out
+
+
+@router.get("/portfolio/diagnostics")
+def portfolio_diagnostics(db: Session = Depends(get_db)):
+    """真实持仓组合诊断:集中度(HHI)/最大单仓/市场分布/风险提示(只读)。"""
+    from src.core.portfolio_diagnostics import diagnose_positions
+
+    return diagnose_positions(_gather_holdings(db))
+
+
+@router.get("/portfolio/benchmark")
+def portfolio_benchmark(
+    days: int = 60, benchmark: str = "000300", db: Session = Depends(get_db)
+):
+    """真实持仓组合 vs 基准:超额收益/信息比率/相对回撤 + 归一化净值曲线。"""
+    from src.core.portfolio_benchmark import (
+        DEFAULT_BENCHMARK,
+        build_portfolio_benchmark,
+    )
+
+    holdings = _gather_holdings(db)
+    if not holdings:
+        return {"empty": True, "reason": "no_holdings"}
+    days = max(20, min(int(days), 250))
+    res = build_portfolio_benchmark(
+        holdings, days=days, benchmark_code=(benchmark or DEFAULT_BENCHMARK)
+    )
+    if not res:
+        return {"empty": True, "reason": "insufficient_data"}
+    return res
