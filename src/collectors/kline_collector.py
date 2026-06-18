@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import httpx
+import json
+import random
+import threading
 import time
 
 from src.core.cn_symbol import get_cn_prefix, is_cn_sh
@@ -480,6 +483,59 @@ def _find_cross_days(
     return None
 
 
+# 腾讯 gtimg 在批量/并发突发下会限流回空 body —— 进程级最小间隔节流 + 重试退避兜底。
+_TENCENT_MIN_INTERVAL_S = 0.15
+_TENCENT_THROTTLE_LOCK = threading.Lock()
+_tencent_last_call = [0.0]
+
+
+def _throttle_tencent() -> None:
+    """进程级限速:保证腾讯行情请求间隔 ≥ _TENCENT_MIN_INTERVAL_S,平滑顺序/并发突发。"""
+    with _TENCENT_THROTTLE_LOCK:
+        wait = _TENCENT_MIN_INTERVAL_S - (time.time() - _tencent_last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _tencent_last_call[0] = time.time()
+
+
+def _parse_tencent_kline_text(text: str, tencent_sym: str) -> list[KlineData]:
+    """解析腾讯 K 线 JS 变量响应(kline_dayqfq={...})为 KlineData;空/异常返回 []。"""
+    if not text or "=" not in text:
+        return []
+    json_str = text.split("=", 1)[1].strip()
+    if json_str.endswith(";"):
+        json_str = json_str[:-1]
+    try:
+        data = json.loads(json_str)
+    except Exception:
+        return []
+    raw_data = data.get("data", {}) if isinstance(data, dict) else {}
+    day_data = []
+    if isinstance(raw_data, dict):
+        stock_data = raw_data.get(tencent_sym, {})
+        if isinstance(stock_data, dict):
+            day_data = stock_data.get("day") or stock_data.get("qfqday") or []
+    elif isinstance(raw_data, list):
+        day_data = raw_data
+    out: list[KlineData] = []
+    for item in day_data or []:
+        if len(item) >= 5:
+            try:
+                out.append(
+                    KlineData(
+                        date=item[0],
+                        open=float(item[1]),
+                        close=float(item[2]),
+                        high=float(item[3]),
+                        low=float(item[4]),
+                        volume=float(item[5]) if len(item) > 5 else 0,
+                    )
+                )
+            except Exception:
+                continue
+    return out
+
+
 class KlineCollector:
     """K线数据采集器（腾讯 API）"""
 
@@ -495,90 +551,45 @@ class KlineCollector:
             "_var": "kline_dayqfq",
         }
 
-        try:
-            with httpx.Client(
-                follow_redirects=True, timeout=10, trust_env=False
-            ) as client:  # 行情直连,绕过 env 代理(生产代理会拦行情接口)
-                resp = client.get(TENCENT_KLINE_URL, params=params)
-                text = resp.text
+        # 腾讯主路径:进程级节流 + 重试退避(gtimg 在批量/并发突发下常限流回空 body,重试可自愈)
+        klines: list[KlineData] = []
+        last_err = None
+        for attempt in range(3):
+            _throttle_tencent()
+            try:
+                with httpx.Client(
+                    follow_redirects=True, timeout=10 + attempt * 4, trust_env=False
+                ) as client:  # 行情直连,绕过 env 代理(生产代理会拦行情接口)
+                    resp = client.get(TENCENT_KLINE_URL, params=params)
+                    text = resp.text
+                klines = _parse_tencent_kline_text(text, tencent_sym)
+                if klines:
+                    break
+                last_err = "空响应"  # gtimg 突发限流常回空 body,退避后重试
+            except Exception as e:
+                last_err = e
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1) + random.uniform(0, 0.25))
 
-            # 解析 JS 变量格式: kline_dayqfq={...}
-            if "=" not in text:
-                logger.warning(f"获取 {symbol} K线数据失败: 格式错误")
-                return []
+        if not klines and last_err is not None:
+            logger.warning(f"腾讯 K线获取失败(已重试)symbol={symbol}: {last_err}")
 
-            json_str = text.split("=", 1)[1].strip()
-            if json_str.endswith(";"):
-                json_str = json_str[:-1]
+        # Tencent 对部分美股返回的 day 数据异常偏少（仅 1-2 条），使用 Stooq 回退。
+        if self.market == MarketCode.US and len(klines) < max(10, min(days, 30)):
+            fallback = _fetch_stooq_us_klines(symbol)
+            if fallback:
+                return fallback[-days:]
 
-            import json
-
-            data = json.loads(json_str)
-
-            # 解析数据 - 兼容多种 API 格式
-            raw_data = data.get("data", {})
-            day_data = []
-
-            if isinstance(raw_data, dict):
-                # 旧格式: data.{symbol}.day 或 data.{symbol}.qfqday
-                stock_data = raw_data.get(tencent_sym, {})
-                if isinstance(stock_data, dict):
-                    day_data = stock_data.get("day") or stock_data.get("qfqday") or []
-            elif isinstance(raw_data, list):
-                # 新格式: data 直接是 K 线数组
-                day_data = raw_data
-
-            if not day_data:
-                logger.warning(
-                    f"K线数据为空 - symbol: {symbol}, code: {data.get('code')}, msg: {data.get('msg')}, data长度: {len(raw_data) if isinstance(raw_data, list) else 'N/A'}"
+        # CN/HK: Tencent 不足时用 Eastmoney 补全更长历史(仅当确实不足)
+        if self.market in (MarketCode.CN, MarketCode.HK):
+            if len(klines) < max(120, int(days * 0.6)):
+                em = _fetch_eastmoney_klines(
+                    symbol, self.market, min(max(days, 3000), 20000)
                 )
+                if len(em) > len(klines):
+                    return em[-days:] if len(em) > days else em
 
-            klines = []
-            for item in day_data:
-                if len(item) >= 5:
-                    klines.append(
-                        KlineData(
-                            date=item[0],
-                            open=float(item[1]),
-                            close=float(item[2]),
-                            high=float(item[3]),
-                            low=float(item[4]),
-                            volume=float(item[5]) if len(item) > 5 else 0,
-                        )
-                    )
-
-            # Tencent 对部分美股返回的 day 数据异常偏少（仅 1-2 条），此时使用 Stooq 回退。
-            if self.market == MarketCode.US and len(klines) < max(10, min(days, 30)):
-                fallback = _fetch_stooq_us_klines(symbol)
-                if fallback:
-                    # Stooq 返回全量历史，这里取最后 days 条
-                    return fallback[-days:]
-
-            # CN/HK: Tencent 在高 days 时可能只返回近几年，尝试 Eastmoney 补全更长历史
-            if self.market in (MarketCode.CN, MarketCode.HK):
-                # 仅当腾讯返回不足时才回退东财。去掉原 `days >= 500` 的无条件触发——
-                # 否则评估循环(days=600)每只标的都额外打一次东财,把它打到自我限流。
-                need_em = len(klines) < max(120, int(days * 0.6))
-                if need_em:
-                    # 额外放大窗口，提升拿到更长历史的概率
-                    em_target_days = min(max(days, 3000), 20000)
-                    em = _fetch_eastmoney_klines(symbol, self.market, em_target_days)
-                    if len(em) > len(klines):
-                        return em[-days:] if len(em) > days else em
-
-            return klines
-
-        except Exception as e:
-            logger.error(f"获取 {symbol} K线数据失败: {e}")
-            # 美股回退到 Stooq
-            if self.market == MarketCode.US:
-                fb = _fetch_stooq_us_klines(symbol)
-                return fb[-days:] if fb else []
-            # CN/HK 回退到 Eastmoney
-            if self.market in (MarketCode.CN, MarketCode.HK):
-                fb = _fetch_eastmoney_klines(symbol, self.market, min(max(days, 3000), 20000))
-                return fb[-days:] if fb else []
-            return []
+        return klines
 
     def get_technical_indicators(self, symbol: str) -> TechnicalIndicators:
         """计算技术指标"""
