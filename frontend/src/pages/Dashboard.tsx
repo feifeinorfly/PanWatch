@@ -13,6 +13,8 @@ import {
   type StrategySignalItem,
   type AlertHitToday,
   type PortfolioTodo,
+  type CurateCandidate,
+  type CuratedItem,
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Onboarding } from '@panwatch/biz-ui/components/onboarding'
@@ -37,6 +39,14 @@ const ALERT_LABEL: Record<string, string> = {
   limit_down: '跌停',
 }
 
+const FEED_BADGE: Record<string, { label: string; cls: string }> = {
+  alert: { label: '提醒命中', cls: 'bg-rose-500/15 text-rose-500' },
+  holding: { label: '持仓', cls: 'bg-emerald-500/15 text-emerald-500' },
+  watch: { label: '自选', cls: 'bg-accent text-muted-foreground' },
+  risk: { label: '风险', cls: 'bg-amber-500/15 text-amber-600' },
+  opportunity: { label: '机会', cls: 'bg-primary/10 text-primary' },
+}
+
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [indices, setIndices] = useState<DashboardMarketIndex[]>([])
@@ -47,6 +57,7 @@ export default function DashboardPage() {
   const [oppFallback, setOppFallback] = useState<StrategySignalItem[]>([])
   const [alertHits, setAlertHits] = useState<AlertHitToday[]>([])
   const [todos, setTodos] = useState<PortfolioTodo[]>([])
+  const [curated, setCurated] = useState<CuratedItem[]>([])
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [modal, setModal] = useState<{ open: boolean; symbol: string; market: string; name: string; hasPosition: boolean }>({
     open: false,
@@ -111,6 +122,57 @@ export default function DashboardPage() {
     return list.slice(0, 5)
   }, [overview, oppFallback])
 
+  // 今日必读候选(多源)→ 交 AI 策展(失败兜底原序)
+  const candidates = useMemo<CurateCandidate[]>(() => {
+    const out: CurateCandidate[] = []
+    for (const h of alertHits) {
+      out.push({ type: 'alert', symbol: h.symbol, name: h.name || h.symbol, market: h.market, signal: `触发提醒 ${h.rule_name}` })
+    }
+    for (const s of urgent) {
+      out.push({
+        type: s.has_position ? 'holding' : 'watch',
+        symbol: s.symbol,
+        name: s.name,
+        market: s.market,
+        change_pct: s.change_pct,
+        signal: s.suggestion?.signal || (s.alert_type ? ALERT_LABEL[s.alert_type] || s.alert_type : ''),
+      })
+    }
+    for (const a of diag?.alerts || []) out.push({ type: 'risk', name: '组合风险', market: '', signal: a })
+    for (const o of opportunities.slice(0, 3)) {
+      out.push({ type: 'opportunity', symbol: o.stock_symbol, name: o.stock_name || o.stock_symbol, market: o.stock_market, signal: o.signal || o.reason || o.action_label || '' })
+    }
+    return out
+  }, [alertHits, urgent, diag, opportunities])
+
+  const candKey = useMemo(
+    () => candidates.map((c) => `${c.type}:${c.symbol}:${c.change_pct ?? ''}`).join('|'),
+    [candidates],
+  )
+
+  useEffect(() => {
+    if (candidates.length === 0) {
+      setCurated([])
+      return
+    }
+    let alive = true
+    dashboardApi
+      .curate(candidates)
+      .then((r) => alive && setCurated(r.items || []))
+      .catch(() => alive && setCurated([]))
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candKey])
+
+  const feed = useMemo(() => {
+    const rows = curated.length
+      ? curated.map((ci) => (candidates[ci.index] ? { ...candidates[ci.index], why: ci.why } : null))
+      : candidates.map((c) => ({ ...c, why: c.signal }))
+    return rows.filter((x): x is CurateCandidate & { why: string } => !!x)
+  }, [curated, candidates])
+
   const hasHoldings = (diag?.position_count ?? 0) > 0
   const benchReady = bench && !bench.empty && bench.excess_return != null
   const hasWatchlist = (overview?.kpis?.watchlist_count ?? 0) > 0
@@ -161,9 +223,9 @@ export default function DashboardPage() {
           <h2 className="text-sm font-semibold">今日要紧事</h2>
           <span className="text-[11px] text-muted-foreground">你的持仓/自选里今天该关注的</span>
         </div>
-        {loading && alertHits.length === 0 && urgent.length === 0 ? (
+        {loading && candidates.length === 0 ? (
           <div className="py-6 text-center text-[12px] text-muted-foreground">扫描中…</div>
-        ) : alertHits.length === 0 && urgent.length === 0 ? (
+        ) : candidates.length === 0 ? (
           todos.length > 0 ? (
             <div className="space-y-1.5 py-1">
               <div className="text-[11px] text-muted-foreground">今日暂无异动/触发 ✓ · 待办:</div>
@@ -185,51 +247,25 @@ export default function DashboardPage() {
           )
         ) : (
           <div className="divide-y divide-border/40">
-            {alertHits.map((h) => (
-              <div
-                key={`hit-${h.rule_id}-${h.symbol}`}
-                className="flex cursor-pointer items-center gap-3 py-2 hover:bg-accent/30"
-                onClick={() => openStock(h.symbol, h.market, h.name, false)}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="shrink-0 rounded bg-rose-500/15 px-1 text-[9px] text-rose-500">提醒命中</span>
-                    <span className="truncate text-[13px] font-medium">{h.name || h.symbol}</span>
+            {feed.map((it, i) => {
+              const badge = FEED_BADGE[it.type] || { label: it.type, cls: 'bg-accent text-muted-foreground' }
+              return (
+                <div
+                  key={i}
+                  className={`flex items-center gap-3 py-2 ${it.symbol ? 'cursor-pointer hover:bg-accent/30' : ''}`}
+                  onClick={() => it.symbol && openStock(it.symbol, it.market || 'CN', it.name || '')}
+                >
+                  <span className={`shrink-0 rounded px-1 text-[9px] ${badge.cls}`}>{badge.label}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-medium">{it.name || it.symbol}</div>
+                    {it.why && <div className="truncate text-[11px] text-muted-foreground">{it.why}</div>}
                   </div>
-                  <div className="truncate text-[11px] text-muted-foreground">
-                    {h.rule_name}
-                    {h.trigger_time ? ` · ${h.trigger_time.slice(11, 16)}` : ''}
-                  </div>
-                </div>
-              </div>
-            ))}
-            {urgent.map((s) => (
-              <div
-                key={`${s.market}:${s.symbol}`}
-                className="flex cursor-pointer items-center gap-3 py-2 hover:bg-accent/30"
-                onClick={() => openStock(s.symbol, s.market, s.name, s.has_position)}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate text-[13px] font-medium">{s.name}</span>
-                    {s.has_position && <span className="rounded bg-emerald-500/15 px-1 text-[9px] text-emerald-500">持仓</span>}
-                    {s.alert_type && ALERT_LABEL[s.alert_type] && (
-                      <span className="rounded bg-amber-500/15 px-1 text-[9px] text-amber-600">{ALERT_LABEL[s.alert_type]}</span>
-                    )}
-                  </div>
-                  {s.suggestion?.signal && <div className="truncate text-[11px] text-muted-foreground">{s.suggestion.signal}</div>}
-                </div>
-                {s.suggestion?.action_label && (
-                  <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">{s.suggestion.action_label}</span>
-                )}
-                <div className="shrink-0 text-right">
-                  <div className={`font-mono text-[13px] ${moveColor(s.change_pct)}`}>{pct(s.change_pct)}</div>
-                  {s.has_position && s.pnl_pct != null && (
-                    <div className={`font-mono text-[10px] ${moveColor(s.pnl_pct)}`}>持仓 {pct(s.pnl_pct)}</div>
+                  {it.change_pct != null && (
+                    <div className={`shrink-0 font-mono text-[13px] ${moveColor(it.change_pct)}`}>{pct(it.change_pct)}</div>
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>

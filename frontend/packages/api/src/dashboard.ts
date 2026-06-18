@@ -268,4 +268,26 @@ export const dashboardApi = {
       timeoutMs: 45000,
     })
   },
+
+  curate: (candidates: CurateCandidate[], model_id?: number) =>
+    fetchAPI<{ items: CuratedItem[] }>('/dashboard/curate', {
+      method: 'POST',
+      body: JSON.stringify({ candidates, model_id }),
+      timeoutMs: 40000,
+    }),
+}
+
+export interface CurateCandidate {
+  type: string
+  symbol?: string
+  name?: string
+  market?: string
+  signal?: string
+  change_pct?: number | null
+}
+
+export interface CuratedItem {
+  index: number
+  importance: number
+  why: string
 }
