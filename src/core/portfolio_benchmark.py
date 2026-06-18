@@ -175,3 +175,68 @@ def build_portfolio_benchmark(
         metrics["benchmark_code"] = benchmark_code
         metrics["benchmark_label"] = benchmark_label(benchmark_code)
     return metrics
+
+
+def build_attribution(
+    holdings: list[dict],
+    *,
+    days: int = 60,
+    benchmark_code: str = DEFAULT_BENCHMARK,
+    kline_fetch=None,
+) -> list[dict]:
+    """近 days 日各持仓对组合收益的贡献(weight×return),按贡献降序。
+
+    contribution_i ≈ 起始权重_i × 区间收益_i;和≈组合收益。用于"谁拖累/贡献"。
+    """
+    bench_dates, _ = _fetch_benchmark_series(benchmark_code, days)
+    if len(bench_dates) < 2:
+        return []
+
+    def _default_fetch(symbol: str, market: str) -> list[KlineData]:
+        try:
+            return KlineCollector(MarketCode(market)).get_klines(symbol, days=days + 10)
+        except Exception:
+            return []
+
+    fetch = kline_fetch or _default_fetch
+
+    series = []
+    for h in holdings:
+        bars = fetch(h["symbol"], h["market"]) or []
+        if bars:
+            series.append((h, bars, min(b.date for b in bars)))
+    if not series:
+        return []
+
+    start_date = max(s[2] for s in series)
+    dates = [d for d in bench_dates if d >= start_date]
+    if len(dates) < 2:
+        return []
+
+    tmp = []
+    nav_start = 0.0
+    for h, bars, _ in series:
+        closes = _ffill_closes(bars, dates)
+        qfx = float(h.get("quantity", 0)) * float(h.get("fx", 1.0))
+        v_start = closes[0] * qfx
+        nav_start += v_start
+        r = (closes[-1] / closes[0] - 1) if closes[0] > 0 else 0.0
+        tmp.append((h, v_start, r))
+    if nav_start <= 0:
+        return []
+
+    rows = []
+    for h, v_start, r in tmp:
+        w = v_start / nav_start
+        rows.append(
+            {
+                "symbol": h["symbol"],
+                "name": h.get("name") or h["symbol"],
+                "market": h["market"],
+                "return_pct": round(r * 100, 2),
+                "weight_pct": round(w * 100, 2),
+                "contribution_pct": round(w * r * 100, 2),
+            }
+        )
+    rows.sort(key=lambda x: x["contribution_pct"], reverse=True)
+    return rows

@@ -1,15 +1,25 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { RefreshCw, AlertTriangle, Sparkles, Activity, ShieldAlert } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import { RefreshCw, AlertTriangle, Sparkles, Activity, ShieldAlert, Newspaper } from 'lucide-react'
 import {
   dashboardApi,
   portfolioApi,
   recommendationsApi,
+  homeApi,
   type DashboardMarketIndex,
   type DashboardMonitorStock,
   type DashboardOverviewResponse,
   type PortfolioDiagnostics,
   type PortfolioBenchmark,
   type StrategySignalItem,
+  type AlertHitToday,
+  type PortfolioTodo,
+  type CurateCandidate,
+  type CuratedItem,
+  type AttributionItem,
+  type PortfolioAiReview,
+  type DashboardBrief,
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Onboarding } from '@panwatch/biz-ui/components/onboarding'
@@ -34,7 +44,16 @@ const ALERT_LABEL: Record<string, string> = {
   limit_down: '跌停',
 }
 
+const FEED_BADGE: Record<string, { label: string; cls: string }> = {
+  alert: { label: '提醒命中', cls: 'bg-rose-500/15 text-rose-500' },
+  holding: { label: '持仓', cls: 'bg-emerald-500/15 text-emerald-500' },
+  watch: { label: '自选', cls: 'bg-accent text-muted-foreground' },
+  risk: { label: '风险', cls: 'bg-amber-500/15 text-amber-600' },
+  opportunity: { label: '机会', cls: 'bg-primary/10 text-primary' },
+}
+
 export default function DashboardPage() {
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [indices, setIndices] = useState<DashboardMarketIndex[]>([])
   const [scan, setScan] = useState<DashboardMonitorStock[]>([])
@@ -42,6 +61,14 @@ export default function DashboardPage() {
   const [diag, setDiag] = useState<PortfolioDiagnostics | null>(null)
   const [bench, setBench] = useState<PortfolioBenchmark | null>(null)
   const [oppFallback, setOppFallback] = useState<StrategySignalItem[]>([])
+  const [alertHits, setAlertHits] = useState<AlertHitToday[]>([])
+  const [todos, setTodos] = useState<PortfolioTodo[]>([])
+  const [curated, setCurated] = useState<CuratedItem[]>([])
+  const [attribution, setAttribution] = useState<AttributionItem[]>([])
+  const [aiReview, setAiReview] = useState<PortfolioAiReview | null>(null)
+  const [aiReviewLoading, setAiReviewLoading] = useState(false)
+  const [brief, setBrief] = useState<DashboardBrief | null>(null)
+  const [briefOpen, setBriefOpen] = useState(false)
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [modal, setModal] = useState<{ open: boolean; symbol: string; market: string; name: string; hasPosition: boolean }>({
     open: false,
@@ -53,18 +80,24 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const [idx, sc, ov, dg, bn] = await Promise.allSettled([
+    const [idx, sc, ov, dg, bn, ht, td, at] = await Promise.allSettled([
       dashboardApi.indices(),
       dashboardApi.intradayScan(),
       dashboardApi.overview({ market: 'ALL', action_limit: 6, risk_limit: 6 }),
       portfolioApi.diagnostics(),
       portfolioApi.benchmark({ days: 60 }),
+      homeApi.alertHitsToday(),
+      homeApi.todos(),
+      portfolioApi.attribution(60),
     ])
     if (idx.status === 'fulfilled') setIndices(idx.value)
     if (sc.status === 'fulfilled') setScan(sc.value.stocks || [])
     if (ov.status === 'fulfilled') setOverview(ov.value)
     if (dg.status === 'fulfilled') setDiag(dg.value)
     if (bn.status === 'fulfilled') setBench(bn.value)
+    if (ht.status === 'fulfilled') setAlertHits(ht.value)
+    if (td.status === 'fulfilled') setTodos(td.value.todos || [])
+    if (at.status === 'fulfilled') setAttribution(at.value.items || [])
     if (ov.status !== 'fulfilled' || !ov.value.action_center?.opportunities?.length) {
       try {
         const r = await recommendationsApi.listStrategySignals({ status: 'active', limit: 5 })
@@ -73,6 +106,13 @@ export default function DashboardPage() {
         /* ignore */
       }
     }
+    // 盘前/盘后简报:取较新的一条
+    const [pm, eod] = await Promise.allSettled([dashboardApi.brief('premarket'), dashboardApi.brief('eod')])
+    const briefs = [pm, eod]
+      .filter((b): b is PromiseFulfilledResult<DashboardBrief> => b.status === 'fulfilled' && !b.value.empty)
+      .map((b) => b.value)
+    briefs.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+    setBrief(briefs[0] || null)
     setLoading(false)
   }, [])
 
@@ -89,6 +129,17 @@ export default function DashboardPage() {
   const openStock = (symbol: string, market: string, name = '', hasPosition = false) =>
     setModal({ open: true, symbol, market: market || 'CN', name, hasPosition })
 
+  const runAiReview = async () => {
+    setAiReviewLoading(true)
+    try {
+      setAiReview(await portfolioApi.aiReview())
+    } catch (e) {
+      setAiReview({ content: e instanceof Error ? `AI 体检失败: ${e.message}` : 'AI 体检失败' })
+    } finally {
+      setAiReviewLoading(false)
+    }
+  }
+
   // 今日要紧事:持仓异动 + 触发的盯盘信号(有 AI 建议/告警优先)
   const urgent = useMemo(() => {
     const items = (scan || []).filter((s) => s.has_position || s.alert_type || s.suggestion?.should_alert)
@@ -102,9 +153,64 @@ export default function DashboardPage() {
     return list.slice(0, 5)
   }, [overview, oppFallback])
 
+  // 今日必读候选(多源)→ 交 AI 策展(失败兜底原序)
+  const candidates = useMemo<CurateCandidate[]>(() => {
+    const out: CurateCandidate[] = []
+    for (const h of alertHits) {
+      out.push({ type: 'alert', symbol: h.symbol, name: h.name || h.symbol, market: h.market, signal: `触发提醒 ${h.rule_name}` })
+    }
+    for (const s of urgent) {
+      out.push({
+        type: s.has_position ? 'holding' : 'watch',
+        symbol: s.symbol,
+        name: s.name,
+        market: s.market,
+        change_pct: s.change_pct,
+        signal: s.suggestion?.signal || (s.alert_type ? ALERT_LABEL[s.alert_type] || s.alert_type : ''),
+      })
+    }
+    for (const a of diag?.alerts || []) out.push({ type: 'risk', name: '组合风险', market: '', signal: a })
+    for (const o of opportunities.slice(0, 3)) {
+      out.push({ type: 'opportunity', symbol: o.stock_symbol, name: o.stock_name || o.stock_symbol, market: o.stock_market, signal: o.signal || o.reason || o.action_label || '' })
+    }
+    return out
+  }, [alertHits, urgent, diag, opportunities])
+
+  const candKey = useMemo(
+    () => candidates.map((c) => `${c.type}:${c.symbol}:${c.change_pct ?? ''}`).join('|'),
+    [candidates],
+  )
+
+  useEffect(() => {
+    if (candidates.length === 0) {
+      setCurated([])
+      return
+    }
+    let alive = true
+    dashboardApi
+      .curate(candidates)
+      .then((r) => alive && setCurated(r.items || []))
+      .catch(() => alive && setCurated([]))
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candKey])
+
+  const feed = useMemo(() => {
+    const rows = curated.length
+      ? curated.map((ci) => (candidates[ci.index] ? { ...candidates[ci.index], why: ci.why } : null))
+      : candidates.map((c) => ({ ...c, why: c.signal }))
+    return rows.filter((x): x is CurateCandidate & { why: string } => !!x)
+  }, [curated, candidates])
+
   const hasHoldings = (diag?.position_count ?? 0) > 0
   const benchReady = bench && !bench.empty && bench.excess_return != null
   const hasWatchlist = (overview?.kpis?.watchlist_count ?? 0) > 0
+  const portfolioPnlPct =
+    diag && diag.total_market_value - diag.total_unrealized_pnl > 0
+      ? (diag.total_unrealized_pnl / (diag.total_market_value - diag.total_unrealized_pnl)) * 100
+      : null
 
   return (
     <div className="page-container pb-10">
@@ -117,6 +223,18 @@ export default function DashboardPage() {
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+          {hasHoldings && portfolioPnlPct != null && (
+            <span className="flex items-center gap-1">
+              <span className="text-muted-foreground">组合浮盈</span>
+              <span className={`font-mono ${moveColor(portfolioPnlPct)}`}>{pct(portfolioPnlPct)}</span>
+            </span>
+          )}
+          {benchReady && (
+            <span className="flex items-center gap-1">
+              <span className="text-muted-foreground">超额</span>
+              <span className={`font-mono ${moveColor(bench!.excess_return)}`}>{pct(bench!.excess_return)}</span>
+            </span>
+          )}
           {indices.slice(0, 5).map((ix) => (
             <span key={`${ix.market}:${ix.symbol}`} className="flex items-center gap-1">
               <span className="text-muted-foreground">{ix.name}</span>
@@ -136,39 +254,49 @@ export default function DashboardPage() {
           <h2 className="text-sm font-semibold">今日要紧事</h2>
           <span className="text-[11px] text-muted-foreground">你的持仓/自选里今天该关注的</span>
         </div>
-        {loading && urgent.length === 0 ? (
+        {loading && candidates.length === 0 ? (
           <div className="py-6 text-center text-[12px] text-muted-foreground">扫描中…</div>
-        ) : urgent.length === 0 ? (
-          <div className="py-6 text-center text-[12px] text-muted-foreground">今日暂无明显异动或触发信号 ✓</div>
+        ) : candidates.length === 0 ? (
+          todos.length > 0 ? (
+            <div className="space-y-1.5 py-1">
+              <div className="text-[11px] text-muted-foreground">今日暂无异动/触发 ✓ · 待办:</div>
+              {todos.map((t, i) => (
+                <div
+                  key={i}
+                  className={`flex items-center gap-2 py-1 text-[12px] ${t.symbol ? 'cursor-pointer hover:bg-accent/30' : ''}`}
+                  onClick={() => t.symbol && openStock(t.symbol, t.market || 'CN', '')}
+                >
+                  <span className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] text-amber-600">
+                    {t.type === 'no_alert' ? '加提醒' : '将到期'}
+                  </span>
+                  <span className="truncate">{t.message}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="py-6 text-center text-[12px] text-muted-foreground">今日暂无明显异动或触发信号 ✓</div>
+          )
         ) : (
           <div className="divide-y divide-border/40">
-            {urgent.map((s) => (
-              <div
-                key={`${s.market}:${s.symbol}`}
-                className="flex cursor-pointer items-center gap-3 py-2 hover:bg-accent/30"
-                onClick={() => openStock(s.symbol, s.market, s.name, s.has_position)}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate text-[13px] font-medium">{s.name}</span>
-                    {s.has_position && <span className="rounded bg-emerald-500/15 px-1 text-[9px] text-emerald-500">持仓</span>}
-                    {s.alert_type && ALERT_LABEL[s.alert_type] && (
-                      <span className="rounded bg-amber-500/15 px-1 text-[9px] text-amber-600">{ALERT_LABEL[s.alert_type]}</span>
-                    )}
+            {feed.map((it, i) => {
+              const badge = FEED_BADGE[it.type] || { label: it.type, cls: 'bg-accent text-muted-foreground' }
+              return (
+                <div
+                  key={i}
+                  className={`flex items-center gap-3 py-2 ${it.symbol ? 'cursor-pointer hover:bg-accent/30' : ''}`}
+                  onClick={() => it.symbol && openStock(it.symbol, it.market || 'CN', it.name || '')}
+                >
+                  <span className={`shrink-0 rounded px-1 text-[9px] ${badge.cls}`}>{badge.label}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-medium">{it.name || it.symbol}</div>
+                    {it.why && <div className="truncate text-[11px] text-muted-foreground">{it.why}</div>}
                   </div>
-                  {s.suggestion?.signal && <div className="truncate text-[11px] text-muted-foreground">{s.suggestion.signal}</div>}
-                </div>
-                {s.suggestion?.action_label && (
-                  <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">{s.suggestion.action_label}</span>
-                )}
-                <div className="shrink-0 text-right">
-                  <div className={`font-mono text-[13px] ${moveColor(s.change_pct)}`}>{pct(s.change_pct)}</div>
-                  {s.has_position && s.pnl_pct != null && (
-                    <div className={`font-mono text-[10px] ${moveColor(s.pnl_pct)}`}>持仓 {pct(s.pnl_pct)}</div>
+                  {it.change_pct != null && (
+                    <div className={`shrink-0 font-mono text-[13px] ${moveColor(it.change_pct)}`}>{pct(it.change_pct)}</div>
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
@@ -224,21 +352,56 @@ export default function DashboardPage() {
               ) : (
                 <div className="pt-1 text-[11px] text-emerald-500">✓ 集中度/分布未见明显风险</div>
               )}
+              {attribution.length > 1 && (
+                <div className="flex justify-between pt-1 text-[11px] text-muted-foreground">
+                  <span>
+                    领涨 <span className={moveColor(attribution[0].contribution_pct)}>{attribution[0].name} {pct(attribution[0].contribution_pct)}</span>
+                  </span>
+                  <span>
+                    拖累{' '}
+                    <span className={moveColor(attribution[attribution.length - 1].contribution_pct)}>
+                      {attribution[attribution.length - 1].name} {pct(attribution[attribution.length - 1].contribution_pct)}
+                    </span>
+                  </span>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={runAiReview}
+                disabled={aiReviewLoading}
+                className="mt-1 w-full rounded border border-border/60 py-1 text-[11px] text-primary hover:bg-accent/30 disabled:opacity-60"
+              >
+                {aiReviewLoading ? 'AI 体检中…' : 'AI 体检报告'}
+              </button>
+              {aiReview?.content && (
+                <div className="prose prose-sm dark:prose-invert mt-1 max-w-none break-words text-[12px] [&_p]:my-1 [&_ul]:my-1">
+                  <ReactMarkdown>{aiReview.content}</ReactMarkdown>
+                </div>
+              )}
             </div>
           )}
         </div>
 
         {/* 机会精选 */}
         <div className="card p-4">
-          <div className="mb-2 flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-semibold">机会精选</h2>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="flex items-center gap-2 text-sm font-semibold">
+              <Sparkles className="h-4 w-4 text-primary" />
+              机会精选
+            </h2>
+            <button
+              type="button"
+              className="text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => navigate('/opportunities')}
+            >
+              进入机会页
+            </button>
           </div>
           {opportunities.length === 0 ? (
             <div className="py-6 text-center text-[12px] text-muted-foreground">{loading ? '加载中…' : '暂无活跃机会信号'}</div>
           ) : (
             <div className="divide-y divide-border/40">
-              {opportunities.map((o) => (
+              {opportunities.slice(0, 3).map((o) => (
                 <div
                   key={`${o.stock_market}:${o.stock_symbol}`}
                   className="flex cursor-pointer items-center gap-2 py-2 hover:bg-accent/30"
@@ -261,6 +424,29 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {brief && (brief.title || brief.content) && (
+        <div className="card mt-3 p-4">
+          <div className="mb-1 flex items-center justify-between">
+            <h2 className="flex items-center gap-2 text-sm font-semibold">
+              <Newspaper className="h-4 w-4 text-primary" />
+              {brief.agent_label}
+              {brief.date && <span className="text-[11px] font-normal text-muted-foreground">{brief.date}</span>}
+            </h2>
+            {brief.content && (
+              <button type="button" className="text-[11px] text-muted-foreground" onClick={() => setBriefOpen((v) => !v)}>
+                {briefOpen ? '收起' : '展开'}
+              </button>
+            )}
+          </div>
+          {brief.title && <div className="text-[13px] font-medium">{brief.title}</div>}
+          {briefOpen && brief.content && (
+            <div className="prose prose-sm dark:prose-invert mt-1 max-w-none break-words text-[12px] [&_p]:my-1 [&_ul]:my-1">
+              <ReactMarkdown>{brief.content}</ReactMarkdown>
+            </div>
+          )}
+        </div>
+      )}
 
       <DiscoveryPanel monitorStocks={scan} onOpenStock={openStock} />
 
