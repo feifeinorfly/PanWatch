@@ -80,40 +80,45 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const [idx, sc, ov, dg, bn, ht, td, at] = await Promise.allSettled([
+    // 快车道:DB/轻量查询,先让首屏(要紧事/指数/体检分布)尽快出来
+    const [idx, sc, ov, dg, ht, td] = await Promise.allSettled([
       dashboardApi.indices(),
       dashboardApi.intradayScan(),
       dashboardApi.overview({ market: 'ALL', action_limit: 6, risk_limit: 6 }),
       portfolioApi.diagnostics(),
-      portfolioApi.benchmark({ days: 60 }),
       homeApi.alertHitsToday(),
       homeApi.todos(),
-      portfolioApi.attribution(60),
     ])
     if (idx.status === 'fulfilled') setIndices(idx.value)
     if (sc.status === 'fulfilled') setScan(sc.value.stocks || [])
     if (ov.status === 'fulfilled') setOverview(ov.value)
     if (dg.status === 'fulfilled') setDiag(dg.value)
-    if (bn.status === 'fulfilled') setBench(bn.value)
     if (ht.status === 'fulfilled') setAlertHits(ht.value)
     if (td.status === 'fulfilled') setTodos(td.value.todos || [])
-    if (at.status === 'fulfilled') setAttribution(at.value.items || [])
+    setLoading(false) // 首屏不再等基准/归因(要拉全持仓 K 线)
+
+    // 机会兜底:overview 无机会时再取(不挡首屏)
     if (ov.status !== 'fulfilled' || !ov.value.action_center?.opportunities?.length) {
-      try {
-        const r = await recommendationsApi.listStrategySignals({ status: 'active', limit: 5 })
-        setOppFallback(r.items || [])
-      } catch {
-        /* ignore */
-      }
+      recommendationsApi
+        .listStrategySignals({ status: 'active', limit: 5 })
+        .then((r) => setOppFallback(r.items || []))
+        .catch(() => {})
     }
-    // 盘前/盘后简报:取较新的一条
-    const [pm, eod] = await Promise.allSettled([dashboardApi.brief('premarket'), dashboardApi.brief('eod')])
-    const briefs = [pm, eod]
-      .filter((b): b is PromiseFulfilledResult<DashboardBrief> => b.status === 'fulfilled' && !b.value.empty)
-      .map((b) => b.value)
-    briefs.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
-    setBrief(briefs[0] || null)
-    setLoading(false)
+
+    // 慢车道:基准/归因需拉全持仓 K 线(40s 级),独立加载,就绪后回填超额/归因
+    Promise.allSettled([portfolioApi.benchmark({ days: 60 }), portfolioApi.attribution(60)]).then(([bn, at]) => {
+      if (bn.status === 'fulfilled') setBench(bn.value)
+      if (at.status === 'fulfilled') setAttribution(at.value.items || [])
+    })
+
+    // 盘前/盘后简报:独立加载,取较新一条
+    Promise.allSettled([dashboardApi.brief('premarket'), dashboardApi.brief('eod')]).then((res) => {
+      const briefs = res
+        .filter((b): b is PromiseFulfilledResult<DashboardBrief> => b.status === 'fulfilled' && !b.value.empty)
+        .map((b) => b.value)
+      briefs.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+      setBrief(briefs[0] || null)
+    })
   }, [])
 
   useEffect(() => {
