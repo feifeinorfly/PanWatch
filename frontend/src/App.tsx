@@ -18,6 +18,7 @@ import LogsModal from '@panwatch/biz-ui/components/logs-modal'
 import AmbientBackground from '@panwatch/biz-ui/components/AmbientBackground'
 import ChatWidget from '@/components/ChatWidget'
 import AccountMenu from '@/components/AccountMenu'
+import SelfCheckModal from '@/components/SelfCheckModal'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
@@ -73,6 +74,7 @@ function App() {
   const location = useLocation()
   const [version, setVersion] = useState('')
   const [logsOpen, setLogsOpen] = useState(false)
+  const [selfCheckOpen, setSelfCheckOpen] = useState(false)
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [upgradeInfo, setUpgradeInfo] = useState<{ latest: string; url: string } | null>(null)
   const checkedUpdateRef = useRef(false)
@@ -182,6 +184,7 @@ function App() {
                 navItems={desktopMoreNavItems}
                 mode={mode}
                 onSetMode={setMode}
+                onOpenSelfCheck={() => setSelfCheckOpen(true)}
               />
             </div>
           </div>
@@ -219,6 +222,7 @@ function App() {
                 navItems={mobileMoreNavItems}
                 mode={mode}
                 onSetMode={setMode}
+                onOpenSelfCheck={() => setSelfCheckOpen(true)}
               />
             </div>
           </div>
@@ -265,6 +269,7 @@ function App() {
       </main>
       <ChatWidget />
       <LogsModal open={logsOpen} onOpenChange={setLogsOpen} />
+      <SelfCheckModal open={selfCheckOpen} onClose={() => setSelfCheckOpen(false)} />
       <Dialog open={upgradeOpen} onOpenChange={setUpgradeOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>

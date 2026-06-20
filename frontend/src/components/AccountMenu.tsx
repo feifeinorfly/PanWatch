@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Moon, Sun, Monitor, Check, LogOut, User, type LucideIcon } from 'lucide-react'
+import { Moon, Sun, Monitor, Check, LogOut, User, Stethoscope, type LucideIcon } from 'lucide-react'
 import { isAuthenticated, logout } from '@panwatch/api'
 import type { ThemeMode } from '@/hooks/use-theme'
 import { useAvatar } from '@/hooks/use-avatar'
@@ -22,6 +22,8 @@ interface AccountMenuProps {
   navItems: AccountNavItem[]
   mode: ThemeMode
   onSetMode: (m: ThemeMode) => void
+  /** 打开「系统自检」弹窗(状态由上层 App 托管,避免桌面/移动两个实例重复)。 */
+  onOpenSelfCheck: () => void
   /** 头像尺寸:桌面 md,移动端 sm。 */
   size?: 'sm' | 'md'
 }
@@ -35,6 +37,7 @@ export default function AccountMenu({
   navItems,
   mode,
   onSetMode,
+  onOpenSelfCheck,
   size = 'md',
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false)
@@ -133,6 +136,19 @@ export default function AccountMenu({
               </button>
             )
           })}
+
+          <div className="my-1 h-px bg-border/50" />
+          {/* 系统自检:打开弹窗(逐项检查数据源/AI/通知连通性) */}
+          <button
+            onClick={() => {
+              setOpen(false)
+              onOpenSelfCheck()
+            }}
+            className="flex w-full items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
+          >
+            <Stethoscope className="w-3.5 h-3.5" />
+            系统自检
+          </button>
 
           {isAuthenticated() && (
             <>

@@ -28,6 +28,7 @@ from src.web.api import (
     chat,
 )
 from src.web.api import factors
+from src.web.api import health
 from src.web.api import insights
 from src.web.api.auth import get_current_user
 from src.web.api.settings import get_app_version
@@ -150,6 +151,12 @@ app.include_router(
     factors.router,
     prefix="/api/factors",
     tags=["factors"],
+    dependencies=protected,
+)
+app.include_router(
+    health.router,
+    prefix="/api/health",
+    tags=["health"],
     dependencies=protected,
 )
 app.include_router(
