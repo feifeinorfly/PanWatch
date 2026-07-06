@@ -49,6 +49,17 @@ function parseBusinessDay(dateStr: string): BusinessDay | null {
   return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
 }
 
+/** 分钟 K 线时间: "2006-01-02 15:04" → Unix 时间戳(秒)，用 Date.UTC 避免时区偏移 */
+function parseMinuteTime(dateStr: string): number | null {
+  const m = String(dateStr || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/)
+  if (!m) return null
+  return Math.floor(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) / 1000)
+}
+
+function isMinuteInterval(iv: string): boolean {
+  return iv === '5m' || iv === '15m' || iv === '30m' || iv === '60m'
+}
+
 function parseCrosshairDateKey(time: any): string | null {
   if (!time || typeof time !== 'object') return null
   const year = Number(time.year)
@@ -155,12 +166,12 @@ function addHistogram(chart: any, LW: any, options: any) {
 export default function InteractiveKline(props: {
   symbol: string
   market: string
-  initialInterval?: '1d' | '1w' | '1m'
+  initialInterval?: '1d' | '1w' | '1m' | '5m' | '15m' | '30m' | '60m'
   initialDays?: '60' | '120' | '250'
 }) {
   const [lwReady, setLwReady] = useState(!!getLW())
   const [libError, setLibError] = useState(false)
-  const [interval, setIntervalValue] = useState<'1d' | '1w' | '1m'>(props.initialInterval || '1d')
+  const [interval, setIntervalValue] = useState<'1d' | '1w' | '1m' | '5m' | '15m' | '30m' | '60m'>(props.initialInterval || '1d')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [data, setData] = useState<KlineItem[]>([])
@@ -172,6 +183,7 @@ export default function InteractiveKline(props: {
     if (Number.isFinite(customDays) && customDays > 0) {
       return Math.floor(customDays)
     }
+    if (isMinuteInterval(interval)) return 10  // 分钟 K 线取 10 天足够
     if (interval === '1m') return 360
     if (interval === '1w') return 180
     return 120
@@ -243,16 +255,17 @@ export default function InteractiveKline(props: {
   }, [lwReady])
 
   const series = useMemo(() => {
-    const klines = (data || []).slice().filter(k => !!parseBusinessDay(k.date))
+    const isMinute = isMinuteInterval(interval)
+    const klines = (data || []).slice().filter(k => isMinute ? !!parseMinuteTime(k.date) : !!parseBusinessDay(k.date))
     const candles = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: isMinute ? parseMinuteTime(k.date) as number : parseBusinessDay(k.date) as BusinessDay,
       open: k.open,
       high: k.high,
       low: k.low,
       close: k.close,
     }))
     const volumes = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: isMinute ? parseMinuteTime(k.date) as number : parseBusinessDay(k.date) as BusinessDay,
       value: k.volume,
       color: k.close >= k.open ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
     }))
@@ -265,8 +278,16 @@ export default function InteractiveKline(props: {
     const volMa10 = sma(volRaw, 10)
     const macd = computeMacd(closes)
     const rsi6 = computeRsi(closes, 6)
-    return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6 }
-  }, [data])
+    // 分钟K线 chartTime→原始date 映射，供 tickMarkFormatter 和 crosshair 使用
+    const dateByChartTime = new Map<number, string>()
+    if (isMinute) {
+      for (const k of klines) {
+        const t = parseMinuteTime(k.date)
+        if (t != null) dateByChartTime.set(t, k.date)
+      }
+    }
+    return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6, dateByChartTime }
+  }, [data, interval])
 
   const latestMetrics = useMemo(() => {
     if (!series.klines.length) return null
@@ -295,6 +316,7 @@ export default function InteractiveKline(props: {
     if (!containerRef.current) return
     if (!series.candles.length) return
 
+    const isMinute = isMinuteInterval(interval)
     const container = containerRef.current
     const macdEl = macdRef.current
 
@@ -305,8 +327,8 @@ export default function InteractiveKline(props: {
     const bg = rootStyle.getPropertyValue('--card').trim()
     const fg = rootStyle.getPropertyValue('--foreground').trim()
 
-    const defaultBars = interval === '1d' ? 100 : interval === '1w' ? 78 : 72
-    const defaultSpacing = interval === '1d' ? 8.5 : interval === '1w' ? 10 : 10
+    const defaultBars = isMinuteInterval(interval) ? 200 : interval === '1d' ? 100 : interval === '1w' ? 78 : 72
+    const defaultSpacing = isMinuteInterval(interval) ? 2.5 : interval === '1d' ? 8.5 : interval === '1w' ? 10 : 10
     const chart = LW.createChart(container, {
       width: container.clientWidth,
       height: 380,
@@ -322,6 +344,12 @@ export default function InteractiveKline(props: {
         barSpacing: defaultSpacing,
         minBarSpacing: 1,
         lockVisibleTimeRangeOnResize: true,
+        tickMarkFormatter: isMinute ? ((time: number) => {
+          const raw = series.dateByChartTime?.get(time)
+          if (raw) return raw.slice(11, 16)  // HH:mm
+          const d = new Date(time * 1000)
+          return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+        }) : undefined,
       },
       handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
@@ -359,7 +387,9 @@ export default function InteractiveKline(props: {
       series.klines
         .map((k, i) => {
           const v = arr[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          if (v == null) return null
+          const time: any = isMinute ? parseMinuteTime(k.date) : parseBusinessDay(k.date)
+          return time == null ? null : { time, value: v }
         })
         .filter(Boolean)
 
@@ -397,21 +427,26 @@ export default function InteractiveKline(props: {
       const macdLineData = series.klines
         .map((k, i) => {
           const v = series.macd.macd[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          if (v == null) return null
+          const time: any = isMinute ? parseMinuteTime(k.date) : parseBusinessDay(k.date)
+          return time == null ? null : { time, value: v }
         })
         .filter(Boolean)
       const sigLineData = series.klines
         .map((k, i) => {
           const v = series.macd.signal[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          if (v == null) return null
+          const time: any = isMinute ? parseMinuteTime(k.date) : parseBusinessDay(k.date)
+          return time == null ? null : { time, value: v }
         })
         .filter(Boolean)
       const histData = series.klines
         .map((k, i) => {
           const v = series.macd.hist[i]
           if (v == null) return null
-          return {
-            time: parseBusinessDay(k.date) as BusinessDay,
+          const time: any = isMinute ? parseMinuteTime(k.date) : parseBusinessDay(k.date)
+          return time == null ? null : {
+            time,
             value: v,
             color: v >= 0 ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
           }
@@ -446,7 +481,9 @@ export default function InteractiveKline(props: {
       const rsiData = series.klines
         .map((k, i) => {
           const v = series.rsi6[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          if (v == null) return null
+          const time: any = isMinute ? parseMinuteTime(k.date) : parseBusinessDay(k.date)
+          return time == null ? null : { time, value: v }
         })
         .filter(Boolean)
       rsiLine.setData(rsiData as any)
@@ -465,7 +502,13 @@ export default function InteractiveKline(props: {
     chart.timeScale().subscribeVisibleTimeRangeChange(sync)
     chart.subscribeCrosshairMove?.((param: any) => {
       const point = param?.point
-      const dateKey = parseCrosshairDateKey(param?.time)
+      const rawTime = param?.time
+      let dateKey: string | null = null
+      if (isMinute && typeof rawTime === 'number') {
+        dateKey = series.dateByChartTime?.get(rawTime) ?? null
+      } else {
+        dateKey = parseCrosshairDateKey(rawTime)
+      }
       if (!point || !dateKey || !series.klines.length) {
         setHoverTip(prev => (prev.visible ? { visible: false, x: 0, y: 0, row: null } : prev))
         return
@@ -567,6 +610,27 @@ export default function InteractiveKline(props: {
                 className={`h-7 min-w-[44px] rounded-md px-2.5 text-[12px] transition-colors ${
                   interval === item.value
                     ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+                }`}
+                onClick={() => setIntervalValue(item.value)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="inline-flex rounded-lg border border-border/60 bg-accent/20 p-0.5">
+            {([
+              { value: '5m', label: '5分' },
+              { value: '15m', label: '15分' },
+              { value: '30m', label: '30分' },
+              { value: '60m', label: '60分' },
+            ] as const).map(item => (
+              <button
+                key={item.value}
+                type="button"
+                className={`h-7 min-w-[40px] rounded-md px-1.5 text-[12px] transition-colors ${
+                  interval === item.value
+                    ? 'bg-orange-500 text-white'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
                 }`}
                 onClick={() => setIntervalValue(item.value)}
