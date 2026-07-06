@@ -80,6 +80,7 @@ class PaperTradingScheduler:
             replace_existing=True,
             coalesce=True,
             max_instances=1,
+            misfire_grace_time=60,
         )
         # 盘前计划 - 每天 09:00
         self.scheduler.add_job(
